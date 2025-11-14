@@ -1,0 +1,28 @@
+# Python venv
+.venv/
+env/
+venv/
+
+# Byte-compiled
+__pycache__/
+*.pyc
+
+# VS Code / PyCharm
+.vscode/
+.idea/
+
+# Data
+data/calib/
+data/test/
+
+# Outputs
+outputs/
+
+# Checkpoints
+checkpoints/*.pt
+checkpoints/*.ptl
+checkpoints/*.ts
+
+# System files
+.DS_Store
+Thumbs.db
