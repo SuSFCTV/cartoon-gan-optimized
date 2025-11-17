@@ -1,61 +1,85 @@
 import argparse
 from pathlib import Path
+
 import torch
-import torch.nn as nn
-from torch.ao.quantization import get_default_qconfig_mapping, QConfigMapping, prepare_fx, convert_fx
+import torch.quantization as tq
 
-from utils import load_fp32_model, load_image_as_tensor, list_images
+from .config import ARTIFACTS_DIR, IMG_SIZE
+from .quant_generator import create_fp32_quant_wrapper
+from .image_utils import load_image_tensor
 
-torch.backends.quantized.engine = "fbgemm"
-torch.set_grad_enabled(False)
 
-def calibrate(prepared: nn.Module, calib_dir: str, size: int = 512, max_imgs: int = 64):
-    paths = list_images(calib_dir)
-    if not paths:
-        raise RuntimeError(f"No images in calib_dir: {calib_dir}")
-    paths = paths[:max_imgs]
-    for p in paths:
-        x = load_image_as_tensor(p, size=size)
-        _ = prepared(x)
+def calibrate(model: torch.nn.Module, calib_dir: Path, num_images: int = 20):
+    model.eval()
+    with torch.inference_mode():
+        img_paths = []
+        for ext in ("*.jpg", "*.jpeg", "*.png"):
+            img_paths.extend(list(calib_dir.glob(ext)))
+        img_paths = img_paths[:num_images]
+
+        if not img_paths:
+            print("[INT8] В calib_dir нет картинок, прогоняем случайный шум")
+            for _ in range(num_images):
+                x = torch.randn(1, 3, IMG_SIZE, IMG_SIZE)
+                x = x * 2.0 - 1.0
+                _ = model(x)
+            return
+
+        for p in img_paths:
+            x = load_image_tensor(p, size=IMG_SIZE)
+            x = x * 2.0 - 1.0
+            _ = model(x)
+
+
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", type=str, default=str(Path(__file__).resolve().parents[2] / "third_party/cartoon-gan/checkpoints/generator.pth"))
-    ap.add_argument("--calib_dir", type=str, default=str(Path(__file__).resolve().parents[1] / "data/calib"))
-    ap.add_argument("--size", type=int, default=512)
-    ap.add_argument("--out_pt", type=str, default=str(Path(__file__).resolve().parents[1] / "checkpoints/cartoon_gan_int8_fx.pt"))
-    ap.add_argument("--also_save_fp32_ts", action="store_true")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="Eager static INT8 quantization for CartoonGAN generator")
+    parser.add_argument(
+        "--calib_dir",
+        type=str,
+        required=True,
+        help="Папка с калибровочными изображениями (реальные фото)",
+    )
+    parser.add_argument(
+        "--ts_out",
+        type=str,
+        default=str(ARTIFACTS_DIR / "cartoon_gan_int8_eager.pth"),
+        help="Куда сохранить INT8-модель (eager nn.Module)",
+    )
+    args = parser.parse_args()
 
-    # 1) Загружаем FP32 модель
-    fp32 = load_fp32_model(args.weights)
-    fp32.eval()
+    calib_dir = Path(args.calib_dir)
+    ts_out = Path(args.ts_out)
+    ts_out.parent.mkdir(parents=True, exist_ok=True)
 
-    # (Опционально) TorchScript FP32 — контрольная точка для мобильного/сравнения
-    if args.also_save_fp32_ts:
-        ts = torch.jit.trace(fp32, torch.randn(1,3,args.size,args.size))
-        ts.save(str(Path(__file__).resolve().parents[1] / "checkpoints/cartoon_gan_fp32.ts"))
-        print("Saved FP32 TorchScript to checkpoints/cartoon_gan_fp32.ts")
+    device = torch.device("cpu")
+    qwrap_fp32 = create_fp32_quant_wrapper(device)
 
-    # 2) FX PTQ
-    example_input = torch.randn(1, 3, args.size, args.size)
-    qconfig_mapping = get_default_qconfig_mapping("fbgemm")  # x86 CPU
+    torch.backends.quantized.engine = "onednn"
+    qwrap_fp32.qconfig = tq.default_qconfig
 
-    print("Preparing FX graph for quantization...")
-    prepared = prepare_fx(fp32, qconfig_mapping, example_input)
+    qwrap_fp32.gen.res.qconfig = None
+    qwrap_fp32.gen.up.qconfig = None
 
-    print("Calibrating on images:", args.calib_dir)
-    calibrate(prepared, calib_dir=args.calib_dir, size=args.size, max_imgs=64)
+    print("[INT8] qconfig:", qwrap_fp32.qconfig)
 
-    print("Converting to INT8...")
-    quantized = convert_fx(prepared)
-    quantized.eval()
+    print("[INT8] Inserting observers (prepare)...")
+    tq.prepare(qwrap_fp32, inplace=True)
 
-    # 3) Сохраняем целиком модуль (для десктоп-инференса)
-    out_path = Path(args.out_pt)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(quantized, str(out_path))
-    print(f"Saved INT8 quantized model: {out_path}")
+    print("[INT8] Calibration...")
+    calibrate(qwrap_fp32, calib_dir=calib_dir, num_images=20)
+
+    print("[INT8] Converting to quantized model...")
+    tq.convert(qwrap_fp32, inplace=True)
+    qwrap_fp32.eval()
+    print("[INT8] Example down-layer after quantization:\n", qwrap_fp32.gen.down[0])
+
+    ts_out = Path(args.ts_out)
+    ts_out.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save(qwrap_fp32, ts_out.as_posix())
+    print(f"[INT8] Saved eager INT8 model (pickled nn.Module) to: {ts_out}")
+
 
 if __name__ == "__main__":
     main()
