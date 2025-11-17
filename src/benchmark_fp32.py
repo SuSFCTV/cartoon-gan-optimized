@@ -12,7 +12,6 @@ def benchmark(device_str: str, runs: int = 30, warmup: int = 10) -> None:
     model = load_generator(device)
     model.eval()
 
-    # случайный тензор вместо реальных картинок для честного сравнения
     x = torch.randn(1, 3, IMG_SIZE, IMG_SIZE, dtype=torch.float32)
     x = x * 2.0 - 1.0
     x = x.to(device)
@@ -38,7 +37,7 @@ def benchmark(device_str: str, runs: int = 30, warmup: int = 10) -> None:
 
     mean_ms = statistics.mean(times) * 1000
     p50_ms = statistics.median(times) * 1000
-    p90_ms = statistics.quantiles(times, n=10)[8] * 1000  # ~90-й перцентиль
+    p90_ms = statistics.quantiles(times, n=10)[8] * 1000
 
     print(f"[FP32 {device.type}] mean={mean_ms:.2f} ms, p50={p50_ms:.2f} ms, p90={p90_ms:.2f} ms")
 
