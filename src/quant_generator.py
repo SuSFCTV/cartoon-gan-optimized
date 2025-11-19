@@ -28,7 +28,7 @@ class QuantizedGeneratorWrapper(nn.Module):
         # возвращаемся в float
         x = self.dequant(x)
 
-        # FLOAT часть (res-блоки + up-decoder)
+        # float часть (res-блоки + up-decoder)
         x = self.gen.res(x)
         x = self.gen.up(x)
         return x
@@ -38,8 +38,7 @@ def create_fp32_quant_wrapper(device: torch.device) -> QuantizedGeneratorWrapper
     """
     Загружает обычный FP32 Generator с весами и оборачивает его в QuantizedGeneratorWrapper.
     """
-    # твоя функция, которая уже используется в fp32_inference
-    float_gen = load_generator(device=torch.device("cpu"))  # квантуем ТОЛЬКО на CPU
+    float_gen = load_generator(device=torch.device("cpu"))
     float_gen.eval()
 
     qwrap = QuantizedGeneratorWrapper(float_gen)
